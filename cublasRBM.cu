@@ -1,43 +1,90 @@
 #include "cuRBM.h"
 
-extern float *d_weight, *d_a, *d_b;
+__constant__ unsigned nVis, nHid, nCase, miniBatch;
+__constant__ float *a, *b, *ones, *vis_data, *vis_reco, *hid_data, *hid_reco;
 
-__global__ void populateBias(float *c){
-  extern __shared__ float v_bias[];
-  //int stride = blockDim.x * gridDim.x;
-  int tid = threadIdx.x;
-  if (tid + blockDim.x * blockIdx.y < nHid){
-    v_bias[tid] = b[tid + blockDim.x * blockIdx.y];
-    for(int i = blockIdx.x * nHid + blockIdx.y * blockDim.x + tid; i < nCase * nHid; i += nHid* gridDim.x)
-      c[i] = v_bias[tid];
-  }
-}
 
-__global__ void addBias(float *c, float *rand){
-  extern __shared__ float v_bias[];
+__global__ void addBiasAndSampling(unsigned nVH, float *c, float *bb, float *rand){
+  extern __shared__ float vh_bias[];
   int tid = threadIdx.x;
-  if (tid + blockDim.x * blockIdx.y < nHid){
-    v_bias[tid] = b[tid + blockDim.x * blockIdx.y];
-    for(int i = blockIdx.x * nHid + blockIdx.y * blockDim.x + tid; i < nCase * nHid; i += nHid* gridDim.x)
-      /*
-      c[i] += v_bias[tid];
-      */
-      if(rand[i] > 1/(1 + exp(-c[i] - v_bias[tid])))
+  if (tid + blockDim.x * blockIdx.y < nVH){
+    vh_bias[tid] = bb[tid + blockDim.x * blockIdx.y];
+    for(int i = blockIdx.x * nVH + blockIdx.y * blockDim.x + tid; i < nCase * nVH; i += nVH* gridDim.x)
+      if(rand[i] > 1/(1 + exp(-c[i] - vh_bias[tid])))
         c[i] = 0;
       else
         c[i] = 1;
   }
 }
 
+__global__ void addBias(unsigned nVH, float *c, float *bb){
+  extern __shared__ float vh_bias[];
+  int tid = threadIdx.x;
+  if (tid + blockDim.x * blockIdx.y < nVH){
+    vh_bias[tid] = bb[tid + blockDim.x * blockIdx.y];
+    for(int i = blockIdx.x * nVH + blockIdx.y * blockDim.x + tid; i < nCase * nVH; i += nVH* gridDim.x)
+      c[i] += vh_bias[tid];
+  }
+}
+
+/*
+__global__ void updateWeight(){
+  
+}
+*/
+float *d_weight, *d_a, *d_b;
 float *d_data_v, *d_data_h, *d_rand;
+float *d_vis_data, *d_vis_reco, *d_hid_data, *d_hid_reco, *d_ones;
+cublasHandle_t handle;
+curandGenerator_t gen;
+const float alpha = 1.0f;
+const float beta  = .0f;
+const float beta_one  = 1.0f;
+unsigned currentBatch;
+const float learn_rate  = 0.0001;
+const float learn_rate_neg  = -0.0001;
 
 void memoryMove();
 
+unsigned copyMiniBatchToDevice(int idx_batch){
+    /* copy mini batch */
+  unsigned currentBatch = h_miniBatch > (ninst - idx_batch)? (ninst - idx_batch): h_miniBatch;
+  CUBLAS_HANDLE_ERROR(cublasSetMatrix(nvisible, currentBatch, sizeof(float),
+                      h_data + idx_batch * nvisible, nvisible, d_data_v, nvisible));
+  HANDLE_ERROR(cudaMemcpyToSymbol(nCase, &currentBatch, sizeof(unsigned), 0,
+               cudaMemcpyHostToDevice));
+  return currentBatch;
+}
+
+void calcUnits(unsigned nunits, float *dev_data, float *b, int sampled){
+  dim3 g(currentBatch, (nunits- 1)/256 + 1);
+  if(sampled){
+    /* set seed for random number generator, generate random numbers (0, 1] */
+    CURAND_HANDLE_ERROR(curandSetPseudoRandomGeneratorSeed(gen, (unsigned) time(NULL)));
+    CURAND_HANDLE_ERROR(curandGenerateUniform(gen, d_rand, currentBatch * nunits));
+    addBiasAndSampling<<<g, 256, 256*sizeof(float)>>>(nunits, dev_data, b, d_rand);
+  }
+  else
+    addBias<<<g, 256, 256*sizeof(float)>>>(nunits, dev_data, b);
+  cudaError_t ret = cudaGetLastError();
+  HANDLE_ERROR(ret);
+}
+
+void calcViHj(float *dev_v, float *dev_h){
+    /* calculate (Hi)data/reco and (Vi)data/reco */
+    const float avg_alpha = 1.0/currentBatch;
+    cublasStatus_t ret;
+    ret = cublasSgemv(handle, CUBLAS_OP_N, nvisible, currentBatch, &avg_alpha, d_data_v, nvisible, d_ones, 1, &beta, dev_v, 1);
+    CUBLAS_HANDLE_ERROR(ret);
+
+    ret = cublasSgemv(handle, CUBLAS_OP_N, nhidden, currentBatch, &avg_alpha, d_data_h, nhidden, d_ones, 1, &beta, dev_h, 1);
+    CUBLAS_HANDLE_ERROR(ret);
+}
+
 void cublasRunRBM(){
   // data
-  float *m_data = (float *)malloc(sizeof(float)*ninst*nvisible);
-  arrayToMatrix(m_data);
-  float *h_data_h = (float *)malloc(sizeof(float)*h_miniBatch*nhidden);
+  //unsigned bigger = nvisible < nhidden? nhidden: nvisible;
+  float *h_data_h = (float *)malloc(sizeof(float) * 2* nvisible * nvisible);
 
   float msecTotal = 0.0f;
   cudaEvent_t start, stop;
@@ -47,54 +94,74 @@ void cublasRunRBM(){
 	
   memoryMove();
   
-  cublasHandle_t handle;
   cublasStatus_t ret;
   ret = cublasCreate(&handle);
   CUBLAS_HANDLE_ERROR(ret);
-  const float alpha = 1.0f;
-  const float beta  = .0f;
 
-  /* set up random generator */
-  curandGenerator_t gen;
-  CURAND_HANDLE_ERROR(curandCreateGenerator(&gen,CURAND_RNG_PSEUDO_DEFAULT));
+  /* create random generator */
+  CURAND_HANDLE_ERROR(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT));
   
   for(unsigned i = 0; i < ninst; i += h_miniBatch){
-    /* copy mini batch */
-    unsigned currentBatch = h_miniBatch > (ninst - i)? (ninst - i): h_miniBatch;
-    HANDLE_ERROR(cudaMemcpy(d_data_v, m_data + i * nvisible, currentBatch * nvisible * sizeof(float), cudaMemcpyHostToDevice));
-    HANDLE_ERROR(cudaMemcpyToSymbol(nCase, &currentBatch, sizeof(unsigned), 0, cudaMemcpyHostToDevice));
-    
-    /* matrix multiplication */
+    currentBatch = copyMiniBatchToDevice(i);
+
+    /* matrix multiplication for hidden units calculation */
     ret = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
                       nhidden, currentBatch, nvisible, &alpha,
                       d_weight, nvisible, d_data_v, nvisible, &beta, d_data_h, nhidden);
     CUBLAS_HANDLE_ERROR(ret);
+    calcUnits(nhidden, d_data_h, d_b, 0);
+    calcViHj(d_vis_data, d_hid_data);
 
-    /* set seed for random number generator, generate random numbers (0, 1] */
-    //CURAND_HANDLE_ERROR(curandSetPseudoRandomGeneratorSeed(gen, 1234ULL));
-    CURAND_HANDLE_ERROR(curandSetPseudoRandomGeneratorSeed(gen, (unsigned) time(NULL)));
-    CURAND_HANDLE_ERROR(curandGenerateUniform(gen, d_rand, currentBatch * nhidden));
-
-    /* add bias, sigmoid, sampling */
-    dim3 g(currentBatch, (nhidden - 1)/256 + 1);
-    addBias<<<g ,256 ,256*sizeof(float)>>>(d_data_h, d_rand);
-    cudaError_t ret1 = cudaGetLastError();
-    HANDLE_ERROR(ret1);
-    HANDLE_ERROR(cudaMemcpy(h_data_h, d_data_h, sizeof(float)*nhidden*h_miniBatch, cudaMemcpyDeviceToHost));
-    cout << "result:" << h_data_h[0] << " " << h_data_h[1] << " " << h_data_h[nhidden];
-
+    /* recontruct visible units */
     ret = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, 
                       nvisible, currentBatch, nhidden, &alpha,
                       d_weight, nvisible, d_data_h, nhidden, &beta, d_data_v, nvisible);
     CUBLAS_HANDLE_ERROR(ret);
+    calcUnits(nvisible, d_data_v, d_a, 0);
 
+    /* recontruct hidden units */
+    ret = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
+                      nhidden, currentBatch, nvisible, &alpha,
+                      d_weight, nvisible, d_data_v, nvisible, &beta, d_data_h, nhidden);
+    CUBLAS_HANDLE_ERROR(ret);
+    calcUnits(nhidden, d_data_h, d_b, 0);
+    calcViHj(d_vis_reco, d_hid_reco);
+
+    /* update weight */
+    ret = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, 
+                      nvisible, nhidden, 1, &learn_rate,
+                      d_vis_data, nvisible, d_hid_data, nhidden, &beta_one, d_weight, nvisible);
+    CUBLAS_HANDLE_ERROR(ret);
+    ret = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, 
+                      nvisible, nhidden, 1, &learn_rate_neg,
+                      d_vis_reco, nvisible, d_hid_reco, nhidden, &beta_one, d_weight, nvisible);
+    CUBLAS_HANDLE_ERROR(ret);
+
+    /* update bias */
+    ret = cublasSaxpy(handle, nvisible, &learn_rate, d_vis_data, 1, d_a, 1);
+    CUBLAS_HANDLE_ERROR(ret);
+    ret = cublasSaxpy(handle, nvisible, &learn_rate_neg, d_vis_reco, 1, d_a, 1);
+    CUBLAS_HANDLE_ERROR(ret);
+
+    ret = cublasSaxpy(handle, nhidden, &learn_rate, d_hid_data, 1, d_b, 1); 
+    CUBLAS_HANDLE_ERROR(ret);
+    ret = cublasSaxpy(handle, nhidden, &learn_rate_neg, d_hid_reco, 1, d_b, 1);
+    CUBLAS_HANDLE_ERROR(ret);
+
+/*
+    HANDLE_ERROR(cudaMemcpy(h_data_h, d_a, sizeof(float)*nvisible, cudaMemcpyDeviceToHost));
+    printArray(h_data_h, 1, nvisible);
+    HANDLE_ERROR(cudaMemcpy(h_data_h, d_b, sizeof(float)*nhidden, cudaMemcpyDeviceToHost));
+    printArray(h_data_h, 1, nhidden);
+    //cout << "result:" << h_data_h[0] << " " << h_data_h[1] << " " << h_data_h[nvisible] << endl;
+*/
   }
   cublasDestroy(handle);
 
-        HANDLE_ERROR(cudaEventRecord(stop, NULL));
-        HANDLE_ERROR(cudaEventSynchronize(stop));
-        HANDLE_ERROR(cudaEventElapsedTime(&msecTotal, start, stop));
-	printf("\tcublas: %.2f msec\n", msecTotal);
+  HANDLE_ERROR(cudaEventRecord(stop, NULL));
+  HANDLE_ERROR(cudaEventSynchronize(stop));
+  HANDLE_ERROR(cudaEventElapsedTime(&msecTotal, start, stop));
+  printf("\tcublas: %.2f msec\n", msecTotal);
 
   HANDLE_ERROR(cudaFree(d_data_v));
   HANDLE_ERROR(cudaFree(d_data_h));
@@ -102,7 +169,6 @@ void cublasRunRBM(){
   HANDLE_ERROR(cudaFree(d_a));
   HANDLE_ERROR(cudaFree(d_b));
   free(h_data_h);
-  free(m_data);
 }
 
 void memoryMove(){
@@ -128,6 +194,22 @@ void memoryMove(){
   HANDLE_ERROR(cudaMemcpyToSymbol(b, &d_b, sizeof(float *), 0, cudaMemcpyHostToDevice));
   
   /* allocate memory for random numbers */
-  unsigned rand_size = nvisible < nhidden? nhidden: nvisible;
-  HANDLE_ERROR(cudaMalloc((void **)&d_rand, h_miniBatch * rand_size * sizeof(float)));
+  unsigned bigger = nvisible < nhidden? nhidden: nvisible;
+  HANDLE_ERROR(cudaMalloc((void **)&d_rand, h_miniBatch * bigger * sizeof(float)));
+
+  float *h_ones = (float *)malloc(h_miniBatch * sizeof(float));
+  fill_n (h_ones, h_miniBatch, 1);
+  HANDLE_ERROR(cudaMalloc((void **)&d_ones, h_miniBatch * sizeof(float)));
+  HANDLE_ERROR(cudaMemcpy(d_ones, h_ones, h_miniBatch * sizeof(float), cudaMemcpyHostToDevice));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(ones, &d_ones, sizeof(float *), 0, cudaMemcpyHostToDevice));
+  free(h_ones);
+
+  HANDLE_ERROR(cudaMalloc((void **)&d_vis_data, nvisible * sizeof(float)));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(vis_data, &d_vh, sizeof(float *), 0, cudaMemcpyHostToDevice));
+  HANDLE_ERROR(cudaMalloc((void **)&d_vis_reco, nvisible * sizeof(float)));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(vis_reco, &d_vh, sizeof(float *), 0, cudaMemcpyHostToDevice));
+  HANDLE_ERROR(cudaMalloc((void **)&d_hid_data, nhidden * sizeof(float)));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(hid_data, &d_vh, sizeof(float *), 0, cudaMemcpyHostToDevice));
+  HANDLE_ERROR(cudaMalloc((void **)&d_hid_reco, nhidden * sizeof(float)));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(hid_reco, &d_vh, sizeof(float *), 0, cudaMemcpyHostToDevice));
 }

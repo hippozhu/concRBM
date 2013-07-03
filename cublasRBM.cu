@@ -1,16 +1,32 @@
 #include "cuRBM.h"
 
-__constant__ unsigned nVis, nHid, nCase, miniBatch;
-__constant__ float *a, *b, *ones, *vis_data, *vis_reco, *hid_data, *hid_reco;
+__constant__ unsigned nCase;
+//__constant__ unsigned nVis, nHid, nCase, miniBatch;
+//__constant__ float *a, *b, *ones, *vis_data, *vis_reco, *hid_data, *hid_reco;
 
+__device__  float  my_rand(unsigned int *seed) {
 
-__global__ void addBiasAndSampling(unsigned nVH, float *c, float *bb, float *rand){
+	// constants for random no gen.
+	unsigned long a = 16807;  		
+	unsigned long m = 2147483647;   	// 2^31 - 1
+	unsigned long x = (unsigned long) *seed;
+
+	x = (a * x)%m;
+
+	*seed = (unsigned int) x;
+
+ 	return ((float)x)/m;
+}
+
+__global__ void addBiasAndSampling(unsigned nVH, float *c, float *bb){
   extern __shared__ float vh_bias[];
   int tid = threadIdx.x;
+  unsigned seed = blockIdx.x * gridDim.y * blockDim.x + blockIdx.y * blockDim.x + tid;  
   if (tid + blockDim.x * blockIdx.y < nVH){
     vh_bias[tid] = bb[tid + blockDim.x * blockIdx.y];
     for(int i = blockIdx.x * nVH + blockIdx.y * blockDim.x + tid; i < nCase * nVH; i += nVH* gridDim.x)
-      if(rand[i] > 1/(1 + exp(-c[i] - vh_bias[tid])))
+      //if(rand[i] > 1/(1 + exp(-c[i] - vh_bias[tid])))
+      if(my_rand(&seed) > 1/(1 + exp(-c[i] - vh_bias[tid])))
         c[i] = 0;
       else
         c[i] = 1;
@@ -27,11 +43,6 @@ __global__ void addBias(unsigned nVH, float *c, float *bb){
   }
 }
 
-/*
-__global__ void updateWeight(){
-  
-}
-*/
 float *d_weight, *d_a, *d_b;
 float *d_data_v, *d_data_h, *d_rand;
 float *d_vis_data, *d_vis_reco, *d_hid_data, *d_hid_reco, *d_ones;
@@ -44,7 +55,8 @@ unsigned currentBatch;
 const float learn_rate  = 0.0001;
 const float learn_rate_neg  = -0.0001;
 
-void memoryMove();
+void deviceMemoryAlloc();
+void deviceMemoryFree();
 
 unsigned copyMiniBatchToDevice(int idx_batch){
     /* copy mini batch */
@@ -60,9 +72,9 @@ void calcUnits(unsigned nunits, float *dev_data, float *b, int sampled){
   dim3 g(currentBatch, (nunits- 1)/256 + 1);
   if(sampled){
     /* set seed for random number generator, generate random numbers (0, 1] */
-    CURAND_HANDLE_ERROR(curandSetPseudoRandomGeneratorSeed(gen, (unsigned) time(NULL)));
-    CURAND_HANDLE_ERROR(curandGenerateUniform(gen, d_rand, currentBatch * nunits));
-    addBiasAndSampling<<<g, 256, 256*sizeof(float)>>>(nunits, dev_data, b, d_rand);
+    //CURAND_HANDLE_ERROR(curandSetPseudoRandomGeneratorSeed(gen, (unsigned) time(NULL)));
+    //CURAND_HANDLE_ERROR(curandGenerateUniform(gen, d_rand, currentBatch * nunits));
+    addBiasAndSampling<<<g, 256, 256*sizeof(float)>>>(nunits, dev_data, b);
   }
   else
     addBias<<<g, 256, 256*sizeof(float)>>>(nunits, dev_data, b);
@@ -91,13 +103,13 @@ void cublasRunRBM(){
   HANDLE_ERROR(cudaEventCreate(&start));
   HANDLE_ERROR(cudaEventCreate(&stop));
   HANDLE_ERROR(cudaEventRecord(start, NULL));
-	
-  memoryMove();
-  
+
   cublasStatus_t ret;
   ret = cublasCreate(&handle);
   CUBLAS_HANDLE_ERROR(ret);
 
+  deviceMemoryAlloc();
+  
   /* create random generator */
   CURAND_HANDLE_ERROR(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT));
   
@@ -109,7 +121,7 @@ void cublasRunRBM(){
                       nhidden, currentBatch, nvisible, &alpha,
                       d_weight, nvisible, d_data_v, nvisible, &beta, d_data_h, nhidden);
     CUBLAS_HANDLE_ERROR(ret);
-    calcUnits(nhidden, d_data_h, d_b, 0);
+    calcUnits(nhidden, d_data_h, d_b, 1);
     calcViHj(d_vis_data, d_hid_data);
 
     /* recontruct visible units */
@@ -117,7 +129,7 @@ void cublasRunRBM(){
                       nvisible, currentBatch, nhidden, &alpha,
                       d_weight, nvisible, d_data_h, nhidden, &beta, d_data_v, nvisible);
     CUBLAS_HANDLE_ERROR(ret);
-    calcUnits(nvisible, d_data_v, d_a, 0);
+    calcUnits(nvisible, d_data_v, d_a, 1);
 
     /* recontruct hidden units */
     ret = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
@@ -163,19 +175,29 @@ void cublasRunRBM(){
   HANDLE_ERROR(cudaEventElapsedTime(&msecTotal, start, stop));
   printf("\tcublas: %.2f msec\n", msecTotal);
 
+  deviceMemoryFree();
+  free(h_data_h);
+}
+
+void deviceMemoryFree(){
   HANDLE_ERROR(cudaFree(d_data_v));
   HANDLE_ERROR(cudaFree(d_data_h));
   HANDLE_ERROR(cudaFree(d_weight));
   HANDLE_ERROR(cudaFree(d_a));
   HANDLE_ERROR(cudaFree(d_b));
-  free(h_data_h);
+  HANDLE_ERROR(cudaFree(d_rand));
+  HANDLE_ERROR(cudaFree(d_ones));
+  HANDLE_ERROR(cudaFree(d_vis_data));
+  HANDLE_ERROR(cudaFree(d_hid_data));
+  HANDLE_ERROR(cudaFree(d_vis_reco));
+  HANDLE_ERROR(cudaFree(d_hid_reco));
 }
 
-void memoryMove(){
+void deviceMemoryAlloc(){
   // basic parametes to constant memory
-  HANDLE_ERROR(cudaMemcpyToSymbol(miniBatch, &h_miniBatch, sizeof(unsigned), 0, cudaMemcpyHostToDevice));
-  HANDLE_ERROR(cudaMemcpyToSymbol(nVis, &nvisible, sizeof(unsigned), 0, cudaMemcpyHostToDevice));
-  HANDLE_ERROR(cudaMemcpyToSymbol(nHid, &nhidden, sizeof(unsigned), 0, cudaMemcpyHostToDevice));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(miniBatch, &h_miniBatch, sizeof(unsigned), 0, cudaMemcpyHostToDevice));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(nVis, &nvisible, sizeof(unsigned), 0, cudaMemcpyHostToDevice));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(nHid, &nhidden, sizeof(unsigned), 0, cudaMemcpyHostToDevice));
 
   // allocate mini batch on device
   HANDLE_ERROR(cudaMalloc((void **)&d_data_v, h_miniBatch * nvisible * sizeof(float)));
@@ -188,10 +210,10 @@ void memoryMove(){
   // bias to global memory
   HANDLE_ERROR(cudaMalloc((void **)&d_a, nvisible * sizeof(float)));
   HANDLE_ERROR(cudaMemcpy(d_a, h_a, nvisible * sizeof(float), cudaMemcpyHostToDevice));
-  HANDLE_ERROR(cudaMemcpyToSymbol(a, &d_a, sizeof(float *), 0, cudaMemcpyHostToDevice));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(a, &d_a, sizeof(float *), 0, cudaMemcpyHostToDevice));
   HANDLE_ERROR(cudaMalloc((void **)&d_b, nhidden * sizeof(float)));
   HANDLE_ERROR(cudaMemcpy(d_b, h_b, nhidden * sizeof(float), cudaMemcpyHostToDevice));
-  HANDLE_ERROR(cudaMemcpyToSymbol(b, &d_b, sizeof(float *), 0, cudaMemcpyHostToDevice));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(b, &d_b, sizeof(float *), 0, cudaMemcpyHostToDevice));
   
   /* allocate memory for random numbers */
   unsigned bigger = nvisible < nhidden? nhidden: nvisible;
@@ -213,3 +235,4 @@ void memoryMove(){
   HANDLE_ERROR(cudaMalloc((void **)&d_hid_reco, nhidden * sizeof(float)));
   //HANDLE_ERROR(cudaMemcpyToSymbol(hid_reco, &d_vh, sizeof(float *), 0, cudaMemcpyHostToDevice));
 }
+

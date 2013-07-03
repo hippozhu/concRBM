@@ -10,7 +10,7 @@
 
 using namespace std;
 
-extern unsigned nvisible, nhidden, ninst, h_miniBatch;
+extern unsigned nvisible, nhidden, ninst, h_miniBatch, nStream, streamBatch;
 extern float *h_data, *h_weight, *h_a, *h_b;
 
 extern void cublasRunRBM();

@@ -8,7 +8,7 @@
 using namespace boost;
 using namespace Eigen;
 
-unsigned nvisible, nhidden, ninst, h_miniBatch;
+unsigned nvisible, nhidden, ninst, h_miniBatch, streamBatch, nStream;
 float *h_data, *h_weight, *h_a, *h_b;
 
 void initData(){
@@ -97,6 +97,8 @@ int main(int argc, char **argv){
   h_miniBatch = atoi(argv[2]);
   nvisible = atoi(argv[3]);
   nhidden = atoi(argv[4]);
+  streamBatch = atoi(argv[5]);
+  nStream = 3;
 
   clock_t tStart = clock();
   cout << "Generating data ...";
@@ -106,7 +108,7 @@ int main(int argc, char **argv){
   initHidBias();
   printf("\t (%.2f)s\n", (double)(clock() - tStart)/CLOCKS_PER_SEC);
   
-  rbm();
+  //rbm();
   cublasRunRBM();
 }
 

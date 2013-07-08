@@ -16,4 +16,4 @@ concRBM.o: concRBM.cu
 	nvcc -g -G -c -gencode arch=compute_20,code=sm_20 concRBM.cu -o concRBM.o
 
 clean:
-	rm -rf *.o cuRBM
+	rm -rf *.o cuRBM concRBM

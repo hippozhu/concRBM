@@ -12,10 +12,14 @@ using namespace std;
 
 extern unsigned nvisible, nhidden, ninst, h_miniBatch, nStream, streamBatch;
 extern float *h_data, *h_weight, *h_a, *h_b;
+extern float *eigen_data_h;
 
 extern void cublasRunRBM();
 extern void arrayToMatrix(float *);
 extern void printArray(float *array, unsigned height, unsigned width);
+extern float sqn(float *, float *, unsigned);
+
+typedef enum {VISIBLE, HIDDEN, VISIBLE_RECO, HIDDEN_RECO} unit_t;
 
 #define CUBLAS_HANDLE_ERROR( err ) (CublasHandleError( err, __FILE__, __LINE__ ))
 static void CublasHandleError( cublasStatus_t err,

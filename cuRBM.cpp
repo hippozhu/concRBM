@@ -10,6 +10,9 @@ using namespace Eigen;
 
 unsigned nvisible, nhidden, ninst, h_miniBatch, streamBatch, nStream;
 float *h_data, *h_weight, *h_a, *h_b;
+float *eigen_data_h;
+MatrixXf m_data_h, m_data_v_reco, m_data_h_reco;
+VectorXf vis_data, hid_data, vis_reco, hid_reco; 
 
 void initData(){
   h_data = (float *)malloc(ninst * nvisible * sizeof(float));
@@ -65,30 +68,44 @@ void printArray(float *array, unsigned height, unsigned width){
   cout << endl;
 }
 
+float sqn(float *a, float *b, unsigned size){
+  float norm = .0;
+  for(unsigned i = 0; i < size; ++ i){
+    norm += (a[i] - b[i]) * (a[i] - b[i]);
+    if(norm > 1)
+      break;
+  }
+  return norm;
+}
+
 void rbm(){
   Map<MatrixXf> m_data_v(h_data, nvisible, ninst);
   Map<MatrixXf> m_weight(h_weight, nvisible, nhidden);
   Map<VectorXf> m_a(h_a, nvisible);
   Map<VectorXf> m_b(h_b, nhidden);
 
-
   clock_t tStart = clock();
-  VectorXf vis_data = m_data_v.rowwise().sum()/h_miniBatch;
-  MatrixXf m_data_h = m_weight.transpose() * m_data_v;
+  vis_data = m_data_v.rowwise().sum()/h_miniBatch;
+  m_data_h = m_weight.transpose() * m_data_v;
   m_data_h.colwise() += m_b;
-  //cout << m_data_h << endl;
-  VectorXf hid_data = m_data_h.rowwise().sum()/h_miniBatch;
-  MatrixXf m_data_v_reco = m_weight * m_data_h;
+  hid_data = m_data_h.rowwise().sum()/h_miniBatch;
+  //eigen_data_h = hid_data.data();
+  //eigen_data_h = m_data_h.data();
+  //cout << hid_data << endl;
+  m_data_v_reco = m_weight * m_data_h;
   m_data_v_reco.colwise() += m_a;
-  MatrixXf m_data_h_reco = m_weight.transpose() * m_data_v_reco;
+  m_data_h_reco = m_weight.transpose() * m_data_v_reco;
   m_data_h_reco.colwise() += m_b;
-  VectorXf vis_reco = m_data_v_reco.rowwise().sum()/h_miniBatch;
-  VectorXf hid_reco = m_data_h_reco.rowwise().sum()/h_miniBatch;
+  vis_reco = m_data_v_reco.rowwise().sum()/h_miniBatch;
+  hid_reco = m_data_h_reco.rowwise().sum()/h_miniBatch;
+  eigen_data_h = hid_reco.data();
+  /*
   //cout << "result:" << m_data_h_reco(0,0) << " " << m_data_h_reco(1,0) << " " << m_data_h_reco(0,1);
   MatrixXf m_weight_new = m_weight + 0.0001 * (vis_data * hid_data.transpose() - 
                         vis_reco * hid_reco.transpose());
   VectorXf m_a_new = m_a + 0.0001 * (vis_data - vis_reco);
   VectorXf m_b_new = m_b + 0.0001 * (hid_data - hid_reco);
+  */
   printf("\tEigen: %.2f msec\n", (double)(clock() - tStart)/(CLOCKS_PER_SEC/1000));
 }
 
@@ -108,7 +125,7 @@ int main(int argc, char **argv){
   initHidBias();
   printf("\t (%.2f)s\n", (double)(clock() - tStart)/CLOCKS_PER_SEC);
   
-  //rbm();
+  rbm();
   cublasRunRBM();
 }
 

@@ -1,6 +1,8 @@
 #include "cuRBM.h"
 
 __constant__ unsigned nCase;
+__constant__ float *data_vis, *data_hid;
+__constant__ float *data_v_reco[10];
 
 __device__  float  my_rand(unsigned int *seed) {
 	// constants for random no gen.
@@ -9,42 +11,47 @@ __device__  float  my_rand(unsigned int *seed) {
 	unsigned long x = (unsigned long) *seed;
 
 	x = (a * x)%m;
-
 	*seed = (unsigned int) x;
-
  	return ((float)x)/m;
 }
 
-__global__ void addBiasAndSampling(unsigned nVH, float *c, float *bb){
+__global__ void bias(float *c, float *bb, unsigned offset, unsigned nVH, unsigned sb){
   extern __shared__ float vh_bias[];
-  int tid = threadIdx.x;
-  unsigned seed = blockIdx.x * gridDim.y * blockDim.x + blockIdx.y * blockDim.x + tid;  
-  if (tid + blockDim.x * blockIdx.y < nVH){
-    vh_bias[tid] = bb[tid + blockDim.x * blockIdx.y];
-    for(int i = blockIdx.x * nVH + blockIdx.y * blockDim.x + tid; i < nCase * nVH; i += nVH* gridDim.x)
-      //if(rand[i] > 1/(1 + exp(-c[i] - vh_bias[tid])))
-      if(my_rand(&seed) > 1/(1 + exp(-c[i] - vh_bias[tid])))
-        c[i] = 0;
-      else
-        c[i] = 1;
+  if(blockDim.x * blockIdx.x + threadIdx.x < sb){
+    unsigned c_idx = offset + blockDim.x * blockIdx.x + threadIdx.x;
+    vh_bias[threadIdx.x] = bb[c_idx];
+    for(; c_idx < nCase * nVH; c_idx += nVH)
+      c[c_idx] += vh_bias[threadIdx.x];
   }
 }
 
-__global__ void addBias(unsigned nVH, float *c, float *bb){
+__global__ void biasSampling(float *c, float *bb, unsigned offset, unsigned nVH, unsigned sb){
   extern __shared__ float vh_bias[];
-  int tid = threadIdx.x;
-  if (tid + blockDim.x * blockIdx.y < nVH){
-    vh_bias[tid] = bb[tid + blockDim.x * blockIdx.y];
-    for(int i = blockIdx.x * nVH + blockIdx.y * blockDim.x + tid; i < nCase * nVH; i += nVH* gridDim.x)
-      c[i] += vh_bias[tid];
+  if(blockDim.x * blockIdx.x + threadIdx.x < sb){
+    unsigned c_idx = offset + blockDim.x * blockIdx.x + threadIdx.x;
+    vh_bias[threadIdx.x] = bb[c_idx];
+    for(; c_idx < nCase * nVH; c_idx += nVH){
+      if(my_rand(&c_idx) > 1/(1 + exp(-c[c_idx] - vh_bias[threadIdx.x])))
+        c[c_idx] = 0;
+      else
+        c[c_idx] = 1;
+    }
+  }
+}
+
+__global__ void sumUpVisReco(int ns, unsigned len, float *c){
+  for(unsigned i = blockDim.x * blockIdx.x + threadIdx.x; i < len; i += blockDim.x * gridDim.x){
+   float s =.0; 
+   for(int j = 0; j < ns; ++ j)
+     s += *(data_v_reco[j] + i);
+   c[i] = s;
   }
 }
 
 float *d_weight, *d_a, *d_b;
-float *d_data_v, *d_data_h, *d_rand;
+float *d_data_v, *d_data_h, *d_data_v_reco, * d_data_h_reco;
+float *dev_data_v_reco[10];
 float *d_vis_data, *d_vis_reco, *d_hid_data, *d_hid_reco, *d_ones;
-cublasHandle_t handle;
-curandGenerator_t gen;
 const float alpha = 1.0f;
 const float beta  = .0f;
 const float beta_one  = 1.0f;
@@ -52,28 +59,39 @@ unsigned currentBatch;
 const float learn_rate  = 0.0001;
 const float learn_rate_neg  = -0.0001;
 
+cublasHandle_t handle;
+curandGenerator_t gen;
+cudaStream_t *strm;
+cudaEvent_t *evt;
+
 void deviceMemoryAlloc();
 void deviceMemoryFree();
 
-unsigned copyMiniBatchToDevice(int idx_batch, cudaStream_t *s){
+//unsigned copyMiniBatchToDevice(int idx_batch, cudaStream_t *s){
+unsigned copyMiniBatchToDevice(int idx_batch){
     /* copy mini batch */
-  unsigned currentBatch = h_miniBatch > (ninst - idx_batch)? (ninst - idx_batch): h_miniBatch;
-  CUBLAS_HANDLE_ERROR(cublasSetStream(handle, *s));
-  CUBLAS_HANDLE_ERROR(cublasSetMatrix(nvisible, currentBatch, sizeof(float),
+  unsigned nBatch = h_miniBatch > (ninst - idx_batch)? (ninst - idx_batch): h_miniBatch;
+  //CUBLAS_HANDLE_ERROR(cublasSetStream(handle, *s));
+  CUBLAS_HANDLE_ERROR(cublasSetMatrix(nvisible, nBatch, sizeof(float),
                       h_data + idx_batch * nvisible, nvisible, d_data_v, nvisible));
-  return currentBatch;
+  //HANDLE_ERROR(cudaMemcpyToSymbolAsync(nCase, &nBatch, sizeof(unsigned), 0,
+  //             cudaMemcpyHostToDevice, *s));
+  HANDLE_ERROR(cudaMemcpyToSymbol(nCase, &nBatch, sizeof(unsigned), 0,
+               cudaMemcpyHostToDevice));
+  return nBatch;
 }
 
+/*
 void calcUnits(unsigned nunits, float *dev_data, float *b, int sampled, cudaStream_t *s){
-  dim3 g(currentBatch, (nunits- 1)/256 + 1);
-  if(sampled){
-    addBiasAndSampling<<<g, 256, 256*sizeof(float), *s>>>(nunits, dev_data, b);
-  }
+  //dim3 g(currentBatch, (nunits- 1)/256 + 1);
+  if(sampled)
+    addBiasAndSampling<<<(nunits- 1)/256 + 1, 256, 256*sizeof(float), *s>>>(nunits, dev_data, b);
   else
-    addBias<<<g, 256, 256*sizeof(float), *s>>>(nunits, dev_data, b);
+    addBias<<<(nunits- 1)/256 + 1, 256, 256*sizeof(float), *s>>>(nunits, dev_data, b);
   cudaError_t ret = cudaGetLastError();
   HANDLE_ERROR(ret);
 }
+*/
 
 void calcViHj(float *dev_v, float *dev_h){
     /* calculate (Hi)data/reco and (Vi)data/reco */
@@ -86,24 +104,64 @@ void calcViHj(float *dev_v, float *dev_h){
     CUBLAS_HANDLE_ERROR(ret);
 }
 
-void deviceMemoryFree(){
-  HANDLE_ERROR(cudaFree(d_data_v));
-  HANDLE_ERROR(cudaFree(d_data_h));
-  HANDLE_ERROR(cudaFree(d_weight));
-  HANDLE_ERROR(cudaFree(d_a));
-  HANDLE_ERROR(cudaFree(d_b));
-  HANDLE_ERROR(cudaFree(d_rand));
-  HANDLE_ERROR(cudaFree(d_ones));
-  HANDLE_ERROR(cudaFree(d_vis_data));
-  HANDLE_ERROR(cudaFree(d_hid_data));
-  HANDLE_ERROR(cudaFree(d_vis_reco));
-  HANDLE_ERROR(cudaFree(d_hid_reco));
+void calcVHij(unit_t u, unsigned offset, unsigned len){
+    /* calculate (Hi)data/reco and (Vi)data/reco */
+    const float avg_alpha = 1.0/currentBatch;
+    float *vhij, *dev_data_vh;
+    int stride;
+    switch (u){
+      case VISIBLE:
+        vhij = d_vis_data + offset;
+        dev_data_vh = d_data_v + offset;
+        stride = nvisible;
+        break;
+      case HIDDEN:
+        vhij = d_hid_data + offset;
+        dev_data_vh = d_data_h + offset;
+        stride = nhidden;
+        break;
+      case VISIBLE_RECO:
+        vhij = d_vis_reco + offset;
+        dev_data_vh = d_data_v_reco + offset;
+        stride = nvisible;
+        break;
+      case HIDDEN_RECO:
+        vhij = d_hid_reco + offset;
+        dev_data_vh = d_data_h + offset;
+        stride = nhidden;
+        break;
+      default:
+        break;
+    }
+    /*
+    if(u == VISIBLE){
+      vhij = d_vis_data + offset;
+      dev_data_vh = d_data_v + offset;
+      stride = nvisible;
+    }
+    else{
+      vhij = d_hid_data + offset;
+      dev_data_vh = d_data_h + offset;
+      stride = nhidden;
+    }*/
+    cublasStatus_t ret;
+    ret = cublasSgemv(handle, CUBLAS_OP_N, len, currentBatch, &avg_alpha, dev_data_vh, stride, d_ones, 1, &beta, vhij, 1);
+    CUBLAS_HANDLE_ERROR(ret);
 }
 
 void deviceMemoryAlloc(){
-  // allocate mini batch on device
+  // allocate for visible & hidden data 
   HANDLE_ERROR(cudaMalloc((void **)&d_data_v, h_miniBatch * nvisible * sizeof(float)));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(data_vis, &d_data_v, sizeof(float *), 0, cudaMemcpyHostToDevice));
   HANDLE_ERROR(cudaMalloc((void **)&d_data_h, h_miniBatch * nhidden * sizeof(float)));
+  //HANDLE_ERROR(cudaMemcpyToSymbol(data_hid, &d_data_h, sizeof(float *), 0, cudaMemcpyHostToDevice));
+  for(int j = 0; j < nStream; ++ j)
+    HANDLE_ERROR(cudaMalloc((void **)&dev_data_v_reco[j], h_miniBatch * nvisible * sizeof(float)));
+  HANDLE_ERROR(cudaMemcpyToSymbol(data_v_reco, &dev_data_v_reco, nStream * sizeof(float *), 0, cudaMemcpyHostToDevice));
+
+  // allocate for vis/hid reconstruction
+  HANDLE_ERROR(cudaMalloc((void **)&d_data_v_reco, h_miniBatch * nvisible * sizeof(float)));
+  //HANDLE_ERROR(cudaMalloc((void **)&d_data_h_reco, h_miniBatch * nhidden * sizeof(float)));
   
   // weights 
   HANDLE_ERROR(cudaMalloc((void **)&d_weight, nvisible * nStream * streamBatch * sizeof(float)));
@@ -111,74 +169,117 @@ void deviceMemoryAlloc(){
   // bias to global memory
   HANDLE_ERROR(cudaMalloc((void **)&d_a, nvisible * sizeof(float)));
   HANDLE_ERROR(cudaMemcpy(d_a, h_a, nvisible * sizeof(float), cudaMemcpyHostToDevice));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(a, &d_a, sizeof(float *), 0, cudaMemcpyHostToDevice));
   HANDLE_ERROR(cudaMalloc((void **)&d_b, nhidden * sizeof(float)));
   HANDLE_ERROR(cudaMemcpy(d_b, h_b, nhidden * sizeof(float), cudaMemcpyHostToDevice));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(b, &d_b, sizeof(float *), 0, cudaMemcpyHostToDevice));
   
-  /* allocate memory for random numbers */
-  unsigned bigger = nvisible < nhidden? nhidden: nvisible;
-  HANDLE_ERROR(cudaMalloc((void **)&d_rand, h_miniBatch * bigger * sizeof(float)));
-
+  // allocate & copy ones vector
   float *h_ones = (float *)malloc(h_miniBatch * sizeof(float));
   fill_n (h_ones, h_miniBatch, 1);
   HANDLE_ERROR(cudaMalloc((void **)&d_ones, h_miniBatch * sizeof(float)));
   HANDLE_ERROR(cudaMemcpy(d_ones, h_ones, h_miniBatch * sizeof(float), cudaMemcpyHostToDevice));
   free(h_ones);
 
+  // allocate for Vi Hj
   HANDLE_ERROR(cudaMalloc((void **)&d_vis_data, nvisible * sizeof(float)));
   HANDLE_ERROR(cudaMalloc((void **)&d_vis_reco, nvisible * sizeof(float)));
   HANDLE_ERROR(cudaMalloc((void **)&d_hid_data, nhidden * sizeof(float)));
   HANDLE_ERROR(cudaMalloc((void **)&d_hid_reco, nhidden * sizeof(float)));
 }
 
-void calcHidden(cudaStream_t strm[]){
-  for(unsigned k = 0; k < nhidden; k += nStream * streamBatch){
+void deviceMemoryFree(){
+  HANDLE_ERROR(cudaFree(d_data_v));
+  HANDLE_ERROR(cudaFree(d_data_h));
+  HANDLE_ERROR(cudaFree(d_weight));
+  HANDLE_ERROR(cudaFree(d_a));
+  HANDLE_ERROR(cudaFree(d_b));
+  //HANDLE_ERROR(cudaFree(d_rand));
+  HANDLE_ERROR(cudaFree(d_ones));
+  HANDLE_ERROR(cudaFree(d_vis_data));
+  HANDLE_ERROR(cudaFree(d_hid_data));
+  HANDLE_ERROR(cudaFree(d_vis_reco));
+  HANDLE_ERROR(cudaFree(d_hid_reco));
+}
 
-      unsigned currentStreamBatch = streamBatch; 
-      unsigned streamBatch_start = k * nStream * streamBatch; 
-      for(int j = 0; j < nStream; ++ j){
-	if(streamBatch_start > nhidden)
-	  break;
+void phase1_TillVisibleRecon(int idx_strm){
+  unsigned currentStreamBatch;
+  float *d_weight_strm = d_weight + idx_strm * nvisible;
+  CUBLAS_HANDLE_ERROR(cublasSetStream(handle, strm[idx_strm]));
+  for(unsigned streamBatch_start = idx_strm * streamBatch; streamBatch_start < nhidden; streamBatch_start += nStream * streamBatch){
+    /* calculate starting position and length */
+    if(streamBatch_start + streamBatch > nhidden)
+      currentStreamBatch = nhidden - streamBatch_start;
+    else
+      currentStreamBatch = streamBatch;
+      
+    /* copy partial weights */
+    float *h_weight_strm = h_weight + streamBatch_start * nvisible;
+    CUBLAS_HANDLE_ERROR(cublasSetMatrix(nvisible, currentStreamBatch, sizeof(float),
+            h_weight_strm, nvisible, d_weight_strm, nvisible));
 
-        CUBLAS_HANDLE_ERROR(cublasSetStream(handle, strm[j]));
+    /* matrix multiplication for hidden units calculation */
+    float *d_data_h_strm = d_data_h + streamBatch_start;
+    cublasStatus_t ret = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
+           currentStreamBatch, currentBatch, nvisible, &alpha,
+           d_weight_strm, nvisible, d_data_v, nvisible, &beta, d_data_h_strm, nhidden);
+    CUBLAS_HANDLE_ERROR(ret);
 
-	if(streamBatch_start + streamBatch > nhidden)
-	  currentStreamBatch = nhidden - streamBatch_start;
+    /* add bias and sampling */
+    bias<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[idx_strm]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
+    cudaError_t cuda_ret = cudaGetLastError();
+    HANDLE_ERROR(cuda_ret);
 
-        // copy partial weights 
-	float * h_weight_sb = h_weight + streamBatch_start * nvisible;
-	float * d_weight_sb = d_weight + j * nvisible;
-        CUBLAS_HANDLE_ERROR(cublasSetMatrix(nvisible, currentStreamBatch, sizeof(float),
-            h_weight_sb, nvisible, d_weight_sb, nvisible));
+    /* calculate H_j */
+    calcVHij(HIDDEN, streamBatch_start, currentStreamBatch);
+    
+    /* partially reconstruct visible units */
+    if(streamBatch_start < nStream * streamBatch)
+      ret = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, 
+            nvisible, currentBatch, currentStreamBatch, &alpha,
+            d_weight_strm, nvisible, d_data_h_strm, nhidden, &beta, dev_data_v_reco[idx_strm], nvisible);
+    else
+      ret = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, 
+            nvisible, currentBatch, currentStreamBatch, &alpha,
+            d_weight_strm, nvisible, d_data_h_strm, nhidden, &beta_one, dev_data_v_reco[idx_strm], nvisible);
 
-        /* matrix multiplication for hidden units calculation */
-	float * d_data_h_sb = d_data_h + streamBatch_start;
-        cublasStatus_t ret = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
-                      currentStreamBatch, currentBatch, nvisible, &alpha,
-                      d_weight_sb, nvisible, d_data_v, nvisible, &beta, d_data_h_sb, nhidden);
-        CUBLAS_HANDLE_ERROR(ret);
-        calcUnits(nhidden, d_data_h, d_b, 0, &strm[j]);
-        calcViHj(d_vis_data, d_hid_data);
-	streamBatch_start += streamBatch;
-      }
-
-      /* recontruct visible units */
-      for(int j = 0; j < nStream; ++ j){
-	if(j>0)
-	  HANDLE_ERROR(cudaStreamWaitEvent());
-        ret = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, 
-                      nvisible, currentBatch, nhidden, &alpha,
-                      d_weight, nvisible, d_data_h, nhidden, &beta, d_data_v, nvisible);
-        CUBLAS_HANDLE_ERROR(ret);
-      }
+    CUBLAS_HANDLE_ERROR(ret);
   }
 }
 
+void phase2(int idx_strm){
+  unsigned currentStreamBatch;
+  float *d_weight_strm = d_weight + idx_strm * nvisible;
+  CUBLAS_HANDLE_ERROR(cublasSetStream(handle, strm[idx_strm]));
+  for(unsigned streamBatch_start = idx_strm * streamBatch; streamBatch_start < nhidden; streamBatch_start += nStream * streamBatch){
+    /* calculate starting position and length */
+    if(streamBatch_start + streamBatch > nhidden)
+      currentStreamBatch = nhidden - streamBatch_start;
+    else
+      currentStreamBatch = streamBatch;
+      
+    /* copy partial weights */
+    float *h_weight_strm = h_weight + streamBatch_start * nvisible;
+    CUBLAS_HANDLE_ERROR(cublasSetMatrix(nvisible, currentStreamBatch, sizeof(float),
+            h_weight_strm, nvisible, d_weight_strm, nvisible));
+
+    /* matrix multiplication for hidden units calculation */
+    float *d_data_h_strm = d_data_h + streamBatch_start;
+    cublasStatus_t ret = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
+           currentStreamBatch, currentBatch, nvisible, &alpha,
+           d_weight_strm, nvisible, d_data_v_reco, nvisible, &beta, d_data_h_strm, nhidden);
+    CUBLAS_HANDLE_ERROR(ret);
+
+    /* add bias and sampling */
+    bias<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[idx_strm]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
+    cudaError_t cuda_ret = cudaGetLastError();
+    HANDLE_ERROR(cuda_ret);
+
+    /* calculate H_j */
+    calcVHij(HIDDEN_RECO, streamBatch_start, currentStreamBatch);
+  }
+}
 
 void cublasRunRBM(){
   // data
-  //unsigned bigger = nvisible < nhidden? nhidden: nvisible;
   float *h_data_h = (float *)malloc(sizeof(float) * nhidden* nvisible);
 
   float msecTotal = 0.0f;
@@ -194,8 +295,8 @@ void cublasRunRBM(){
   deviceMemoryAlloc();
   
   /* initialize streams and events */
-  cudaStream_t strm[nStream];
-  cudaEvent_t evt[nStream];
+  strm = (cudaStream_t *)malloc(nStream * sizeof(cudaStream_t));
+  evt = (cudaEvent_t *)malloc(nStream * sizeof(cudaEvent_t));
   for(int j = 0; j < nStream; ++ j){
     HANDLE_ERROR(cudaStreamCreate(&strm[j]));
     HANDLE_ERROR(cudaEventCreate(&evt[j]));
@@ -203,21 +304,50 @@ void cublasRunRBM(){
 
   /* main loop over all samples by mini-batch */
   for(unsigned i = 0; i < ninst; i += h_miniBatch){
-    currentBatch = copyMiniBatchToDevice(i, &strm[0]);
-    HANDLE_ERROR(cudaEventRecord(evt[0], strm[0]));
+    /* copy mini-batch in default stream */
+    currentBatch = copyMiniBatchToDevice(i);
+    calcVHij(VISIBLE, 0, nvisible);
 
     /* sync for mini-batch copy */
-    for(int j = 1; j < nStream; ++ j)
-      HANDLE_ERROR(cudaStreamWaitEvent(strm[j], evt[0], 0));
-
-    /* first calculation for hidden */
-    calcHidden(strm);
     cudaDeviceSynchronize();
 
-    calcVisible(strm);
+    /* concurrent streams */
+    for(int j = 0; j < nStream; ++ j)
+      phase1_TillVisibleRecon(j);
+
+    /* sync for visible recon matrix by all streams and sum up 
+       return to default NULL stream, implicit sync */
+    int streamUsed;
+    if(1.0*nhidden/streamBatch > nStream - 1)
+      streamUsed = nStream;
+    else
+      streamUsed = (nhidden - 1)/streamBatch + 1;
+    sumUpVisReco<<<(currentBatch * nvisible)/256 + 1, 256>>>(streamUsed, currentBatch * nvisible, d_data_v_reco);
     cudaDeviceSynchronize();
+    bias<<<(nvisible - 1)/256 + 1, 256, 256*sizeof(float)>>>(d_data_v_reco, d_a, 0, nvisible, nvisible);
+    cudaDeviceSynchronize();
+    cudaError_t cuda_ret = cudaGetLastError();
+    HANDLE_ERROR(cuda_ret);
+
+    //cudaError_t cuda_ret = cudaGetLastError();
+    //HANDLE_ERROR(cuda_ret);
+    CUBLAS_HANDLE_ERROR(cublasSetStream(handle, NULL));
+    calcVHij(VISIBLE_RECO, 0, nvisible);
+    cudaDeviceSynchronize();
+
+    /* concurrent streams */
+    for(int j = 0; j < nStream; ++ j)
+      phase2(j);
   }
   cublasDestroy(handle);
+
+    //unsigned row = currentBatch;
+    unsigned row = 1;
+    unsigned col = nhidden;
+    HANDLE_ERROR(cudaMemcpy(h_data_h, d_hid_reco, sizeof(float)*row*col, cudaMemcpyDeviceToHost));
+    //printArray(h_data_h, row, col);
+    //printArray(eigen_data_h, row, col);
+    cout << "sqare norm: " << sqn(h_data_h, eigen_data_h, row * col) << endl;
 
   HANDLE_ERROR(cudaEventRecord(stop, NULL));
   HANDLE_ERROR(cudaEventSynchronize(stop));
@@ -227,3 +357,73 @@ void cublasRunRBM(){
   deviceMemoryFree();
   free(h_data_h);
 }
+
+void calcHidden(){
+  unsigned currentStreamBatch, streamBatch_start;
+  float *h_weight_sb[nStream];
+  float *d_weight_sb[nStream];
+  float *d_data_h_sb[nStream];
+  for(unsigned k = 0; k < nhidden; k += nStream * streamBatch){
+
+    for(int j = 0; j < nStream; ++ j){
+      if((streamBatch_start = k + j * streamBatch) >= nhidden)
+        break;
+      if(streamBatch_start + streamBatch > nhidden)
+	currentStreamBatch = nhidden - streamBatch_start;
+      else
+	currentStreamBatch = streamBatch;
+
+      CUBLAS_HANDLE_ERROR(cublasSetStream(handle, strm[j]));
+
+      /* copy partial weights */
+      h_weight_sb[j] = h_weight + streamBatch_start * nvisible;
+      d_weight_sb[j] = d_weight + j * nvisible;
+      CUBLAS_HANDLE_ERROR(cublasSetMatrix(nvisible, currentStreamBatch, sizeof(float),
+            h_weight_sb[j], nvisible, d_weight_sb[j], nvisible));
+
+      /* matrix multiplication for hidden units calculation */
+      d_data_h_sb[j] = d_data_h + streamBatch_start;
+      cublasStatus_t ret = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
+                   currentStreamBatch, currentBatch, nvisible, &alpha,
+                   d_weight_sb[j], nvisible, d_data_v, nvisible, &beta, d_data_h_sb[j], nhidden);
+      CUBLAS_HANDLE_ERROR(ret);
+
+      //calcUnits(nhidden, d_data_h_sb[j], d_b, 0, &strm[j]);
+      bias<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[j]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
+      cudaError_t cuda_ret = cudaGetLastError();
+      HANDLE_ERROR(cuda_ret);
+
+      //calcViHj(d_vis_data, d_hid_data);
+      calcVHij(HIDDEN, streamBatch_start, currentStreamBatch);
+    }
+
+    /* recontruct visible units */
+    for(int j = 0; j < nStream; ++ j){
+      if((streamBatch_start = k + j * streamBatch) >= nhidden)
+	  break;
+      if(streamBatch_start + streamBatch > nhidden)
+	currentStreamBatch = nhidden - streamBatch_start;
+      else
+	currentStreamBatch = streamBatch;
+	  
+      CUBLAS_HANDLE_ERROR(cublasSetStream(handle, strm[j]));
+
+      cublasStatus_t ret;
+      if(j == 0 && k == 0)
+        ret = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, 
+              nvisible, currentBatch, currentStreamBatch, &alpha,
+              d_weight, nvisible, d_data_h, nhidden, &beta, d_data_v, nvisible);
+      else{
+	HANDLE_ERROR(cudaStreamWaitEvent(strm[j], evt[(j-1)%nStream], 0));
+        ret = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, 
+              nvisible, currentBatch, currentStreamBatch, &alpha,
+              d_weight, nvisible, d_data_h, nhidden, &beta_one, d_data_v, nvisible);
+      }
+      CUBLAS_HANDLE_ERROR(ret);
+      //if(j < nStream - 1 && k + nStream * streamBatch < nhidden)
+      //
+      HANDLE_ERROR(cudaEventRecord(evt[j], strm[j]));
+    }
+  }
+}
+

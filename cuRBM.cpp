@@ -11,7 +11,7 @@ using namespace Eigen;
 unsigned nvisible, nhidden, ninst, h_miniBatch, streamBatch, nStream;
 float *h_data, *h_weight, *h_a, *h_b;
 float *eigen_data_h;
-MatrixXf m_data_h, m_data_v_reco, m_data_h_reco;
+MatrixXf m_data_h, m_data_v_reco, m_data_h_reco, m_weight_new;
 VectorXf vis_data, hid_data, vis_reco, hid_reco; 
 
 void initData(){
@@ -89,7 +89,6 @@ void rbm(){
   m_data_h = m_weight.transpose() * m_data_v;
   m_data_h.colwise() += m_b;
   hid_data = m_data_h.rowwise().sum()/h_miniBatch;
-  //eigen_data_h = hid_data.data();
   //eigen_data_h = m_data_h.data();
   //cout << hid_data << endl;
   m_data_v_reco = m_weight * m_data_h;
@@ -98,11 +97,12 @@ void rbm(){
   m_data_h_reco.colwise() += m_b;
   vis_reco = m_data_v_reco.rowwise().sum()/h_miniBatch;
   hid_reco = m_data_h_reco.rowwise().sum()/h_miniBatch;
-  eigen_data_h = hid_reco.data();
-  /*
   //cout << "result:" << m_data_h_reco(0,0) << " " << m_data_h_reco(1,0) << " " << m_data_h_reco(0,1);
-  MatrixXf m_weight_new = m_weight + 0.0001 * (vis_data * hid_data.transpose() - 
+  m_weight_new = m_weight + 10 * (vis_data * hid_data.transpose() - 
                         vis_reco * hid_reco.transpose());
+  eigen_data_h = m_weight_new.data();
+  //eigen_data_h = hid_data.data();
+  /*
   VectorXf m_a_new = m_a + 0.0001 * (vis_data - vis_reco);
   VectorXf m_b_new = m_b + 0.0001 * (hid_data - hid_reco);
   */
@@ -115,7 +115,7 @@ int main(int argc, char **argv){
   nvisible = atoi(argv[3]);
   nhidden = atoi(argv[4]);
   streamBatch = atoi(argv[5]);
-  nStream = 3;
+  nStream = atoi(argv[6]);
 
   clock_t tStart = clock();
   cout << "Generating data ...";
@@ -125,7 +125,7 @@ int main(int argc, char **argv){
   initHidBias();
   printf("\t (%.2f)s\n", (double)(clock() - tStart)/CLOCKS_PER_SEC);
   
-  rbm();
+  //rbm();
   cublasRunRBM();
 }
 

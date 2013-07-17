@@ -9,6 +9,7 @@ using namespace boost;
 using namespace Eigen;
 
 unsigned nvisible, nhidden, ninst, h_miniBatch, streamBatch, nStream;
+int blockSize;
 float *h_data, *h_weight, *h_a, *h_b;
 float *eigen_data_h;
 MatrixXf m_data_h, m_data_v_reco, m_data_h_reco, m_weight_new;
@@ -114,8 +115,9 @@ int main(int argc, char **argv){
   h_miniBatch = atoi(argv[2]);
   nvisible = atoi(argv[3]);
   nhidden = atoi(argv[4]);
-  streamBatch = atoi(argv[5]);
-  nStream = atoi(argv[6]);
+  blockSize = atoi(argv[5]);
+  streamBatch = atoi(argv[6]);
+  nStream = atoi(argv[7]);
 
   clock_t tStart = clock();
   cout << "Generating data ...";

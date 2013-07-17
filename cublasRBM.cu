@@ -3,17 +3,18 @@
 __constant__ unsigned nCase;
 //__constant__ unsigned nVis, nHid, nCase, miniBatch;
 //__constant__ float *a, *b, *ones, *vis_data, *vis_reco, *hid_data, *hid_reco;
+__device__ unsigned seed;
 
-__device__  float  my_rand(unsigned int *seed) {
+__device__  float  my_rand() {
 
 	// constants for random no gen.
 	unsigned long a = 16807;  		
 	unsigned long m = 2147483647;   	// 2^31 - 1
-	unsigned long x = (unsigned long) *seed;
+	unsigned long x = (unsigned long) seed;
 
 	x = (a * x)%m;
 
-	*seed = (unsigned int) x;
+	seed = (unsigned int) x;
 
  	return ((float)x)/m;
 }
@@ -24,7 +25,7 @@ __global__ void addBiasAndSampling(unsigned nVH, float *c, float *bb){
   if (tid + blockDim.x * blockIdx.x < nVH){
     vh_bias[tid] = bb[tid + blockDim.x * blockIdx.x];
     for(unsigned i = tid + blockDim.x * blockIdx.x; i < nCase * nVH; i += nVH)
-      if(my_rand(&i) > 1/(1 + exp(-c[i] - vh_bias[tid])))
+      if(my_rand() > 1/(1 + exp(-c[i] - vh_bias[tid])))
         c[i] = 0;
       else
         c[i] = 1;
@@ -67,15 +68,15 @@ unsigned copyMiniBatchToDevice(int idx_batch){
 }
 
 void calcUnits(unsigned nunits, float *dev_data, float *b, int sampled){
-  //dim3 g(currentBatch, (nunits- 1)/256 + 1);
+  //dim3 g(currentBatch, (nunits- 1)/blockSize + 1);
   if(sampled){
     /* set seed for random number generator, generate random numbers (0, 1] */
     //CURAND_HANDLE_ERROR(curandSetPseudoRandomGeneratorSeed(gen, (unsigned) time(NULL)));
     //CURAND_HANDLE_ERROR(curandGenerateUniform(gen, d_rand, currentBatch * nunits));
-    addBiasAndSampling<<<(nunits- 1)/256 + 1, 256, 256*sizeof(float)>>>(nunits, dev_data, b);
+    addBiasAndSampling<<<(nunits- 1)/blockSize + 1, blockSize, blockSize*sizeof(float)>>>(nunits, dev_data, b);
   }
   else
-    addBias<<<(nunits- 1)/256 + 1, 256, 256*sizeof(float)>>>(nunits, dev_data, b);
+    addBias<<<(nunits- 1)/blockSize + 1, blockSize, blockSize*sizeof(float)>>>(nunits, dev_data, b);
   cudaError_t ret = cudaGetLastError();
   HANDLE_ERROR(ret);
 }
@@ -119,7 +120,7 @@ void cublasRunRBM(){
                       nhidden, currentBatch, nvisible, &alpha,
                       d_weight, nvisible, d_data_v, nvisible, &beta, d_data_h, nhidden);
     CUBLAS_HANDLE_ERROR(ret);
-    calcUnits(nhidden, d_data_h, d_b, 0);
+    calcUnits(nhidden, d_data_h, d_b, 1);
     calcViHj(d_vis_data, d_hid_data);
 /*
 */
@@ -131,7 +132,7 @@ void cublasRunRBM(){
                       nvisible, currentBatch, nhidden, &alpha,
                       d_weight, nvisible, d_data_h, nhidden, &beta, d_data_v, nvisible);
     CUBLAS_HANDLE_ERROR(ret);
-    calcUnits(nvisible, d_data_v, d_a, 0);
+    calcUnits(nvisible, d_data_v, d_a, 1);
 
     /* recontruct hidden units */
     ret = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 

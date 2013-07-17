@@ -250,7 +250,8 @@ void phase1_TillVisibleRecon(int idx_strm){
     CUBLAS_HANDLE_ERROR(ret);
 
     /* add bias and sampling */
-    bias<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[idx_strm]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
+    //bias<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[idx_strm]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
+    biasSampling<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[idx_strm]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
     cudaError_t cuda_ret = cudaGetLastError();
     HANDLE_ERROR(cuda_ret);
 
@@ -294,7 +295,8 @@ void phase2(int idx_strm){
     CUBLAS_HANDLE_ERROR(ret);
 
     /* add bias and sampling */
-    bias<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[idx_strm]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
+    //bias<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[idx_strm]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
+    biasSampling<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[idx_strm]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
     cudaError_t cuda_ret = cudaGetLastError();
     HANDLE_ERROR(cuda_ret);
 
@@ -436,7 +438,8 @@ void calcHidden(){
       CUBLAS_HANDLE_ERROR(ret);
 
       //calcUnits(nhidden, d_data_h_sb[j], d_b, 0, &strm[j]);
-      bias<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[j]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
+      //bias<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[j]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
+      biasSampling<<<(currentStreamBatch - 1)/256 + 1, 256, 256*sizeof(float), strm[j]>>>(d_data_h, d_b, streamBatch_start, nhidden, currentStreamBatch);
       cudaError_t cuda_ret = cudaGetLastError();
       HANDLE_ERROR(cuda_ret);
 

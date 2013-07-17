@@ -11,6 +11,7 @@
 using namespace std;
 
 extern unsigned nvisible, nhidden, ninst, h_miniBatch, nStream, streamBatch;
+extern int blockSize;
 extern float *h_data, *h_weight, *h_a, *h_b;
 extern float *eigen_data_h;
 

@@ -28,4 +28,4 @@ concStrmRBM.o: concStrmRBM.cu
 	nvcc -c -gencode arch=compute_20,code=sm_20 concStrmRBM.cu -o concStrmRBM.o
 
 clean:
-	rm -rf *.o cuRBM concRBM
+	rm -rf *.o concRBM cuRBM streamRBM concStrmRBM 

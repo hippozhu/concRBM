@@ -110,9 +110,10 @@ void cublasRunRBM(){
   deviceMemoryAlloc();
   
   /* create random generator */
-  CURAND_HANDLE_ERROR(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT));
+  //CURAND_HANDLE_ERROR(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT));
   
   for(unsigned i = 0; i < ninst; i += h_miniBatch){
+    //cout << "Mini-batch: " << i/h_miniBatch << endl;
     currentBatch = copyMiniBatchToDevice(i);
 
     /* matrix multiplication for hidden units calculation */
@@ -122,10 +123,6 @@ void cublasRunRBM(){
     CUBLAS_HANDLE_ERROR(ret);
     calcUnits(nhidden, d_data_h, d_b, 1);
     calcViHj(d_vis_data, d_hid_data);
-/*
-*/
-    HANDLE_ERROR(cudaMemcpy(h_data_h, d_data_h, sizeof(float)*currentBatch*nhidden, cudaMemcpyDeviceToHost));
-    //printArray(h_data_h, nhidden, currentBatch);
 
     /* recontruct visible units */
     ret = cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, 
@@ -163,20 +160,14 @@ void cublasRunRBM(){
     ret = cublasSaxpy(handle, nhidden, &learn_rate_neg, d_hid_reco, 1, d_b, 1);
     CUBLAS_HANDLE_ERROR(ret);
 
-/*
-    HANDLE_ERROR(cudaMemcpy(h_data_h, d_a, sizeof(float)*nvisible, cudaMemcpyDeviceToHost));
-    printArray(h_data_h, 1, nvisible);
-    HANDLE_ERROR(cudaMemcpy(h_data_h, d_b, sizeof(float)*nhidden, cudaMemcpyDeviceToHost));
-    printArray(h_data_h, 1, nhidden);
-    //cout << "result:" << h_data_h[0] << " " << h_data_h[1] << " " << h_data_h[nvisible] << endl;
-*/
   }
   cublasDestroy(handle);
 
   HANDLE_ERROR(cudaEventRecord(stop, NULL));
   HANDLE_ERROR(cudaEventSynchronize(stop));
   HANDLE_ERROR(cudaEventElapsedTime(&msecTotal, start, stop));
-  printf("\tcublas: %.2f msec\n", msecTotal);
+  run_time = msecTotal;
+  //printf("\tcublas: %.2f msec\n", msecTotal);
 
   deviceMemoryFree();
   free(h_data_h);
@@ -188,7 +179,7 @@ void deviceMemoryFree(){
   HANDLE_ERROR(cudaFree(d_weight));
   HANDLE_ERROR(cudaFree(d_a));
   HANDLE_ERROR(cudaFree(d_b));
-  HANDLE_ERROR(cudaFree(d_rand));
+  //HANDLE_ERROR(cudaFree(d_rand));
   HANDLE_ERROR(cudaFree(d_ones));
   HANDLE_ERROR(cudaFree(d_vis_data));
   HANDLE_ERROR(cudaFree(d_hid_data));
@@ -197,11 +188,6 @@ void deviceMemoryFree(){
 }
 
 void deviceMemoryAlloc(){
-  // basic parametes to constant memory
-  //HANDLE_ERROR(cudaMemcpyToSymbol(miniBatch, &h_miniBatch, sizeof(unsigned), 0, cudaMemcpyHostToDevice));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(nVis, &nvisible, sizeof(unsigned), 0, cudaMemcpyHostToDevice));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(nHid, &nhidden, sizeof(unsigned), 0, cudaMemcpyHostToDevice));
-
   // allocate mini batch on device
   HANDLE_ERROR(cudaMalloc((void **)&d_data_v, h_miniBatch * nvisible * sizeof(float)));
   HANDLE_ERROR(cudaMalloc((void **)&d_data_h, h_miniBatch * nhidden * sizeof(float)));
@@ -213,29 +199,22 @@ void deviceMemoryAlloc(){
   // bias to global memory
   HANDLE_ERROR(cudaMalloc((void **)&d_a, nvisible * sizeof(float)));
   HANDLE_ERROR(cudaMemcpy(d_a, h_a, nvisible * sizeof(float), cudaMemcpyHostToDevice));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(a, &d_a, sizeof(float *), 0, cudaMemcpyHostToDevice));
   HANDLE_ERROR(cudaMalloc((void **)&d_b, nhidden * sizeof(float)));
   HANDLE_ERROR(cudaMemcpy(d_b, h_b, nhidden * sizeof(float), cudaMemcpyHostToDevice));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(b, &d_b, sizeof(float *), 0, cudaMemcpyHostToDevice));
   
   /* allocate memory for random numbers */
-  unsigned bigger = nvisible < nhidden? nhidden: nvisible;
-  HANDLE_ERROR(cudaMalloc((void **)&d_rand, h_miniBatch * bigger * sizeof(float)));
+  //unsigned bigger = nvisible < nhidden? nhidden: nvisible;
+  //HANDLE_ERROR(cudaMalloc((void **)&d_rand, h_miniBatch * bigger * sizeof(float)));
 
   float *h_ones = (float *)malloc(h_miniBatch * sizeof(float));
   fill_n (h_ones, h_miniBatch, 1);
   HANDLE_ERROR(cudaMalloc((void **)&d_ones, h_miniBatch * sizeof(float)));
   HANDLE_ERROR(cudaMemcpy(d_ones, h_ones, h_miniBatch * sizeof(float), cudaMemcpyHostToDevice));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(ones, &d_ones, sizeof(float *), 0, cudaMemcpyHostToDevice));
   free(h_ones);
 
   HANDLE_ERROR(cudaMalloc((void **)&d_vis_data, nvisible * sizeof(float)));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(vis_data, &d_vh, sizeof(float *), 0, cudaMemcpyHostToDevice));
   HANDLE_ERROR(cudaMalloc((void **)&d_vis_reco, nvisible * sizeof(float)));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(vis_reco, &d_vh, sizeof(float *), 0, cudaMemcpyHostToDevice));
   HANDLE_ERROR(cudaMalloc((void **)&d_hid_data, nhidden * sizeof(float)));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(hid_data, &d_vh, sizeof(float *), 0, cudaMemcpyHostToDevice));
   HANDLE_ERROR(cudaMalloc((void **)&d_hid_reco, nhidden * sizeof(float)));
-  //HANDLE_ERROR(cudaMemcpyToSymbol(hid_reco, &d_vh, sizeof(float *), 0, cudaMemcpyHostToDevice));
 }
 

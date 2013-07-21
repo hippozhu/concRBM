@@ -14,11 +14,19 @@ float *h_data, *h_weight, *h_a, *h_b;
 float *eigen_data_h;
 MatrixXf m_data_h, m_data_v_reco, m_data_h_reco, m_weight_new;
 VectorXf vis_data, hid_data, vis_reco, hid_reco; 
+float run_time;
 
 void initData(){
   h_data = (float *)malloc(ninst * nvisible * sizeof(float));
   unsigned i = 0;
   while(i < ninst * nvisible)
+    h_data[i++] = rand()%2;
+}
+
+void initData1(){
+  h_data = (float *)malloc(h_miniBatch * nvisible * sizeof(float));
+  unsigned i = 0;
+  while(i < h_miniBatch* nvisible)
     h_data[i++] = rand()%2;
 }
 
@@ -30,10 +38,14 @@ void initWeight(){
 
   //h_weight = (float *)malloc(nvisible * nhidden * sizeof(float));
   cudaMallocHost((void**)&h_weight, nvisible * nhidden * sizeof(float));
-  unsigned i = 0;
-  while(i < nvisible * nhidden)
-    h_weight[i++] = var_nor();
+  //unsigned i = 0;
+  //fill(h_weight, h_weight + nvisible * nhidden, 1);
+  //while(i < nvisible * nhidden)
+    //h_weight[i++] = var_nor();
     //h_weight[i++] = 1;
+  //for(i=0; i < 10 ; i++)
+    //cout << h_weight[i] << " ";
+  //cout << endl;
 }
 
 void initVisBias(){
@@ -119,15 +131,21 @@ int main(int argc, char **argv){
   streamBatch = atoi(argv[6]);
   nStream = atoi(argv[7]);
 
-  clock_t tStart = clock();
-  cout << "Generating data ...";
+  //cout << "Generating data ...";
   initData();
-  initWeight();
   initVisBias();
   initHidBias();
-  printf("\t (%.2f)s\n", (double)(clock() - tStart)/CLOCKS_PER_SEC);
+  //clock_t tStart = clock();
+  initWeight();
+  //cout << "weight" << endl;
+  //printf("\t (%.2f)s\n", (double)(clock() - tStart)/CLOCKS_PER_SEC);
   
   //rbm();
-  cublasRunRBM();
+  cout << nvisible << "," << nhidden;
+  for(int i=0; i < 10; i++){
+   cublasRunRBM();
+   cout << "," << run_time;
+  }
+  cout << endl;
 }
 
